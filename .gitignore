@@ -1,4 +1,23 @@
+# Virtual environment
 venv/
-*.gguf
+
+# Python cache files
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Model files (large GGUF models)
+*.gguf
+models/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Logs and outputs (optional)
+logs/
+outputs/
+
+# VS Code settings (optional, personal workspace files)
+.vscode/
