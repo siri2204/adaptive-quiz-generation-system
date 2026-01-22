@@ -3,12 +3,38 @@ import streamlit as st
 import pdfplumber
 import tempfile
 import os
+import random
+import re
 from gpt4all import GPT4All
 
-st.set_page_config(page_title="AI Quiz Generator", layout="centered")
-st.title("📘 AI-Powered Quiz Generator")
+# -------------------- PAGE SETUP --------------------
+st.set_page_config(
+    page_title="Adaptive AI Quiz Generator",
+    layout="centered"
+)
 
-# Load model once
+st.title("📘 Adaptive AI Quiz Generator")
+
+# -------------------- SESSION STATE --------------------
+if "pdf_text" not in st.session_state:
+    st.session_state.pdf_text = ""
+
+if "difficulty" not in st.session_state:
+    st.session_state.difficulty = "Easy"
+
+if "current_mcq" not in st.session_state:
+    st.session_state.current_mcq = None
+
+if "score" not in st.session_state:
+    st.session_state.score = 0
+
+if "total" not in st.session_state:
+    st.session_state.total = 0
+
+if "source" not in st.session_state:
+    st.session_state.source = ""
+
+# -------------------- LOAD MODEL (LOCAL, NO DOWNLOAD) --------------------
 @st.cache_resource
 def load_model():
     model_path = os.path.join(
@@ -19,62 +45,170 @@ def load_model():
     )
     return GPT4All(model_path, allow_download=False)
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_upload")
+# -------------------- PDF UPLOAD --------------------
+uploaded_file = st.file_uploader(
+    "Upload lecture notes (PDF)",
+    type=["pdf"]
+)
 
 if uploaded_file:
-    st.success("PDF uploaded successfully!")
-
-    # Save PDF temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
-        temp_path = tmp.name
+        pdf_path = tmp.name
 
-    # Extract text from first page and skip first 10 lines (metadata)
-    with pdfplumber.open(temp_path) as pdf:
-        text = ""
-        page_text = pdf.pages[0].extract_text() or ""
-        lines = page_text.splitlines()
-        # Skip first 10 lines (title, authors, emails)
-        if len(lines) > 10:
-            lines = lines[10:]
-        text = " ".join(lines)
+    extracted_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages[:2]:
+            extracted_text.append(page.extract_text() or "")
 
-    st.subheader("Extracted Text (preview)")
-    st.text(text[:800])
+    st.session_state.pdf_text = " ".join(extracted_text)
+    st.success("PDF uploaded successfully!")
 
-    # Generate MCQ
-    if st.button("Generate 1 MCQ"):
-        with st.spinner("Generating MCQ..."):
-            model = load_model()
+    st.subheader("📄 Extracted Text Preview")
+    st.text(st.session_state.pdf_text[:900])
 
-            prompt = f"""
-You are an educational quiz generator.
+# -------------------- STOP IF NO PDF --------------------
+if not st.session_state.pdf_text.strip():
+    st.info("Please upload a PDF to continue.")
+    st.stop()
 
-Based ONLY on the academic content below, create exactly ONE multiple-choice question that tests understanding of the material.
+# -------------------- CONTROLS --------------------
+st.subheader("Select difficulty")
+st.session_state.difficulty = st.radio(
+    "Difficulty",
+    ["Easy", "Medium", "Hard"],
+    label_visibility="collapsed"
+)
 
-Rules:
-- The question must be factual and content-based
-- Provide 4 options labeled A, B, C, D
-- Clearly indicate the correct answer at the end
-- Do NOT ask meta-questions or repeat the title
+st.subheader("Question generator")
+generator = st.radio(
+    "Generator",
+    ["AI (GPT4All)", "Baseline (Rule-Based)"],
+    label_visibility="collapsed"
+)
 
-Content:
+# -------------------- RULE-BASED GENERATOR --------------------
+def rule_based_question(text):
+    concepts = ["variables", "Python", "machine learning", "neural networks"]
+    concept = random.choice(concepts)
+
+    return f"""Question: What best describes {concept} based on the lecture?
+
+A. It is a key concept explained in the material  
+B. It is a hardware component  
+C. It is unrelated to the topic  
+D. It is an obsolete technology  
+
+Correct Answer: A
+"""
+
+# -------------------- AI GENERATOR (FIXED & ROBUST) --------------------
+def ai_question(text, difficulty):
+    model = load_model()
+
+    prompt = f"""
+You are an academic quiz generator.
+
+Create EXACTLY ONE multiple-choice question based ONLY on the content below.
+
+Difficulty: {difficulty}
+
+FORMAT EXACTLY:
+
+Question: <question>
+
+A. <option>
+B. <option>
+C. <option>
+D. <option>
+
+Correct Answer: <A/B/C/D>
+
+RULES:
+- No explanations
+- No meta-questions
+- Exactly one correct answer
+
+CONTENT:
 {text[:700]}
 """
 
-            try:
-                with model.chat_session():
-                    mcq = model.generate(prompt, max_tokens=400)
+    with model.chat_session():
+        output = model.generate(
+            prompt,
+            max_tokens=350,
+            temp=0.2
+        ).strip()
 
-                # Parse model output to display neatly
-                mcq_lines = mcq.strip().splitlines()
-                if len(mcq_lines) < 2:
-                    st.warning("⚠️ Model did not generate a proper MCQ. Try again or shorten PDF.")
-                else:
-                    st.subheader("Generated MCQ")
-                    for line in mcq_lines:
-                        st.text(line)
+    # ---- RELAXED BUT SAFE VALIDATION ----
+    has_correct = re.search(r"Correct Answer:\s*[ABCD]", output)
+    options = re.findall(r"^[A-D][\.\)]\s+", output, re.MULTILINE)
 
-            except Exception as e:
-                st.error(f"Error generating MCQ: {e}")
+    if not has_correct or len(options) < 4:
+        raise ValueError("AI output invalid")
+
+    return output
+
+# -------------------- GENERATE QUESTION --------------------
+if st.button(
+    "Generate Question" if st.session_state.current_mcq is None else "Generate Next Question"
+):
+    with st.spinner("Generating question..."):
+        try:
+            if generator.startswith("AI"):
+                mcq = ai_question(
+                    st.session_state.pdf_text,
+                    st.session_state.difficulty
+                )
+                source = "AI-generated (GPT4All)"
+            else:
+                mcq = rule_based_question(st.session_state.pdf_text)
+                source = "Rule-Based"
+
+        except Exception:
+            mcq = rule_based_question(st.session_state.pdf_text)
+            source = "Rule-Based (AI failed safely)"
+
+    st.session_state.current_mcq = mcq
+    st.session_state.source = source
+
+# -------------------- DISPLAY QUESTION --------------------
+if st.session_state.current_mcq:
+    st.subheader("📝 Quiz Question")
+    st.text(st.session_state.current_mcq)
+    st.caption(f"Source: {st.session_state.source}")
+
+    answer = st.radio(
+        "Your answer",
+        ["A", "B", "C", "D"]
+    )
+
+    if st.button("Submit Answer"):
+        st.session_state.total += 1
+
+        correct = re.search(
+            r"Correct Answer:\s*([ABCD])",
+            st.session_state.current_mcq
+        ).group(1)
+
+        if answer == correct:
+            st.success("Correct ✅")
+            st.session_state.score += 1
+            if st.session_state.difficulty == "Easy":
+                st.session_state.difficulty = "Medium"
+            elif st.session_state.difficulty == "Medium":
+                st.session_state.difficulty = "Hard"
+        else:
+            st.error(f"Incorrect ❌ (Correct: {correct})")
+            if st.session_state.difficulty == "Hard":
+                st.session_state.difficulty = "Medium"
+            elif st.session_state.difficulty == "Medium":
+                st.session_state.difficulty = "Easy"
+
+        st.info(
+            f"Score: {st.session_state.score}/{st.session_state.total} | "
+            f"Next difficulty: {st.session_state.difficulty}"
+        )
+
+        st.session_state.current_mcq = None
 
