@@ -252,9 +252,4 @@ Do not commit API keys, `.env` files, credentials, or other sensitive informatio
 
 ---
 
-## 11. Author
 
-**Siri Kotnuru**
-
-MSc Seminar Project
-Saarland University
